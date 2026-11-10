@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands
 import os
 import json
+import asyncio
+import glob
 from flask import Flask
 from threading import Thread
 
@@ -188,7 +190,9 @@ async def on_member_join(member):
         except: pass
     if config.get("dm", False):
         try: await member.send(final_msg)
-        except: pass@bot.command()
+        except: pass
+
+@bot.command()
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
     embed = discord.Embed(title="🛠️ Build Your Server", description="Pick a template below. I will create Categories, Channels, Roles with colors, Welcome & Rules automatically.", color=0x3498db)
@@ -378,9 +382,7 @@ async def roles(ctx):
     for r in ctx.guild.roles[::-1]:
         if r.name != "@everyone":
             msg += f"{r.mention} - `{str(r.color)}`\n"
-    await ctx.send(msg)
-
-@bot.command()
+    await ctx.send(msg)@bot.command()
 @commands.has_permissions(administrator=True)
 async def build(ctx, *, text: str):
     await ctx.send("🔨 Building... parsing your request...")
@@ -568,5 +570,141 @@ async def premium(ctx, user: discord.Member = None):
 @bot.command()
 async def myid(ctx):
     await ctx.send(f"Your ID is: `{ctx.author.id}`\nUse this for OWNER_ID")
+
+# ===== NEXUS CLONE - SECOND HALF =====
+async def do_clone(ctx, source_data):
+    guild = ctx.guild
+    await ctx.send("🔨 **Cloning... This takes 30-60 sec, don't spam.**")
+    for rd in source_data["roles"]:
+        if discord.utils.get(guild.roles, name=rd["name"]):
+            continue
+        try:
+            col_str = str(rd["color"]).replace("#", "").replace("0x", "")
+            col = discord.Color(int(col_str, 16)) if col_str else discord.Color(0x3498db)
+        except:
+            col = discord.Color(0x3498db)
+        try:
+            await guild.create_role(name=rd["name"], color=col, hoist=rd.get("hoist", False), mentionable=rd.get("mentionable", False), reason="NEXUS CLONE")
+        except: pass
+        await asyncio.sleep(0.3)
+    for cd in source_data["categories"]:
+        cat = None
+        if cd["name"]:
+            cat = discord.utils.get(guild.categories, name=cd["name"])
+            if not cat:
+                cat = await guild.create_category(cd["name"])
+        for chd in cd["channels"]:
+            if discord.utils.get(guild.channels, name=chd["name"]):
+                continue
+            try:
+                if chd["type"] == "voice":
+                    await guild.create_voice_channel(chd["name"], category=cat)
+                else:
+                    await guild.create_text_channel(chd["name"], category=cat, topic=chd.get("topic"))
+            except: pass
+            await asyncio.sleep(0.3)
+    await ctx.send("✅ **CLONE DONE!** Server copied!")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clone_help(ctx):
+    await ctx.send("**📋 NEXUS CLONE Commands:**\n`!clone_backup` - Save this server layout\n`!clone_preview` - See saved layout\n`!clone_here` - Clone saved layout into THIS server\n`!clone_from <server_id>` - Clone from another server bot is in\n`!clone_roles` - Clone only roles\n`!clone_channels` - Clone only channels")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clone_backup(ctx):
+    guild = ctx.guild
+    data = {"roles": [], "categories": []}
+    for r in guild.roles:
+        if r.name == "@everyone" or r.managed:
+            continue
+        data["roles"].append({"name": r.name, "color": str(r.color), "hoist": r.hoist, "mentionable": r.mentionable})
+    for cat in guild.categories:
+        chans = []
+        for ch in cat.channels:
+            chans.append({"name": ch.name, "type": "voice" if isinstance(ch, discord.VoiceChannel) else "text", "topic": getattr(ch, 'topic', None)})
+        data["categories"].append({"name": cat.name, "channels": chans})
+    uncat = [c for c in guild.channels if c.category is None]
+    if uncat:
+        data["categories"].append({"name": None, "channels": [{"name": c.name, "type": "voice" if isinstance(c, discord.VoiceChannel) else "text", "topic": getattr(c, 'topic', None)} for c in uncat]})
+    json.dump(data, open(f"clone_{guild.id}.json", "w"), indent=2)
+    await ctx.send(f"✅ **Backup saved!** {len(data['roles'])} roles, {len(data['categories'])} categories. Use `!clone_here` in another server to copy it.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clone_preview(ctx):
+    try:
+        data = json.load(open(f"clone_{ctx.guild.id}.json"))
+    except:
+        return await ctx.send("❌ No backup! Do `!clone_backup` first.")
+    msg = f"**📋 Backup Preview:**\nRoles: {len(data['roles'])}\n"
+    for c in data["categories"]:
+        msg += f"\n**{c['name'] or 'No Category'}** - {len(c['channels'])} channels\n"
+        for ch in c["channels"]:
+            msg += f"  - #{ch['name']} ({ch['type']})\n"
+    await ctx.send(msg[:1900])
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clone_here(ctx):
+    files = glob.glob("clone_*.json")
+    if not files:
+        return await ctx.send("❌ No backup found. Do `!clone_backup` in source server first.")
+    try:
+        data = json.load(open(f"clone_{ctx.guild.id}.json"))
+    except:
+        data = json.load(open(files[0]))
+    await do_clone(ctx, data)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clone_from(ctx, source_id: int):
+    source = bot.get_guild(source_id)
+    if not source:
+        return await ctx.send("❌ Bot is not in that server! Invite bot to BOTH servers first.")
+    data = {"roles": [], "categories": []}
+    for r in source.roles:
+        if r.name == "@everyone" or r.managed:
+            continue
+        data["roles"].append({"name": r.name, "color": str(r.color), "hoist": r.hoist, "mentionable": r.mentionable})
+    for cat in source.categories:
+        chans = [{"name": ch.name, "type": "voice" if isinstance(ch, discord.VoiceChannel) else "text", "topic": getattr(ch, 'topic', None)} for ch in cat.channels]
+        data["categories"].append({"name": cat.name, "channels": chans})
+    await do_clone(ctx, data)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clone_roles(ctx, source_id: int = None):
+    src = bot.get_guild(source_id) if source_id else ctx.guild
+    if not src:
+        return await ctx.send("❌ Source not found.")
+    for r in src.roles:
+        if r.name == "@everyone" or r.managed:
+            continue
+        if discord.utils.get(ctx.guild.roles, name=r.name):
+            continue
+        try:
+            await ctx.guild.create_role(name=r.name, color=r.color, hoist=r.hoist, mentionable=r.mentionable, reason="NEXUS CLONE ROLES")
+        except: pass
+    await ctx.send("✅ Roles cloned!")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def clone_channels(ctx, source_id: int = None):
+    src = bot.get_guild(source_id) if source_id else ctx.guild
+    if not src:
+        return await ctx.send("❌ Source not found.")
+    for cat in src.categories:
+        new_cat = discord.utils.get(ctx.guild.categories, name=cat.name)
+        if not new_cat:
+            new_cat = await ctx.guild.create_category(cat.name)
+        for ch in cat.channels:
+            if discord.utils.get(ctx.guild.channels, name=ch.name):
+                continue
+            if isinstance(ch, discord.VoiceChannel):
+                await ctx.guild.create_voice_channel(ch.name, category=new_cat)
+            else:
+                await ctx.guild.create_text_channel(ch.name, category=new_cat, topic=getattr(ch, 'topic', None))
+    await ctx.send("✅ Channels cloned!")
 
 bot.run(os.environ.get("TOKEN"))
